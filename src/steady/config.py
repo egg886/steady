@@ -37,6 +37,7 @@ Environment variables
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Any, Callable
@@ -46,6 +47,17 @@ __all__ = ["Config", "get_config"]
 
 _TRUTHY = {"1", "true", "yes", "on", "y", "t"}
 """Strings interpreted as boolean ``True`` when reading env vars."""
+
+#: Valid log level names accepted by :func:`logging.getLevelNamesMapping`
+#: (Python 3.11+) or the fallback dict below (3.9/3.10).
+_LOG_LEVELS = {
+    "CRITICAL": logging.CRITICAL,
+    "ERROR": logging.ERROR,
+    "WARNING": logging.WARNING,
+    "INFO": logging.INFO,
+    "DEBUG": logging.DEBUG,
+    "NOTSET": logging.NOTSET,
+}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -74,6 +86,19 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_log_level(name: str, default: str) -> str:
+    """Read a logging level name from an environment variable.
+
+    Returns the uppercased value if it is a recognised level name,
+    otherwise *default*.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    level = raw.strip().upper()
+    return level if level in _LOG_LEVELS else default
+
+
 class Config:
     """Global configuration for steady.
 
@@ -96,6 +121,7 @@ class Config:
         self._provider: str = "openai"
         self._max_retries: int = 3
         self._enabled: bool = True
+        self._log_level: str = "WARNING"
         self._lock = threading.RLock()
         self._auto_load()
 
@@ -109,7 +135,7 @@ class Config:
             ``STEADY_API_KEY`` -> ``OPENAI_API_KEY`` (fallback).
 
         Also reads ``STEADY_MODEL``, ``STEADY_PROVIDER``,
-        ``STEADY_MAX_RETRIES`` and ``STEADY_ENABLED``.
+        ``STEADY_MAX_RETRIES``, ``STEADY_ENABLED`` and ``STEADY_LOG_LEVEL``.
         """
         # API key: STEADY_API_KEY takes priority, OPENAI_API_KEY is fallback.
         self._api_key = os.environ.get("STEADY_API_KEY") or os.environ.get(
@@ -126,6 +152,7 @@ class Config:
 
         self._max_retries = _env_int("STEADY_MAX_RETRIES", 3)
         self._enabled = _env_bool("STEADY_ENABLED", True)
+        self._log_level = _env_log_level("STEADY_LOG_LEVEL", "WARNING")
 
     # ------------------------------------------------------------------ #
     # Programmatic configuration
@@ -139,6 +166,7 @@ class Config:
         provider: str | None = None,
         max_retries: int | None = None,
         enabled: bool | None = None,
+        log_level: str | None = None,
     ) -> None:
         """Programmatically update configuration.
 
@@ -162,6 +190,10 @@ class Config:
             Maximum repair attempts per error.
         enabled:
             Master switch. ``False`` disables steady entirely.
+        log_level:
+            Logging level for steady's internal logger. One of
+            ``"DEBUG"``, ``"INFO"``, ``"WARNING"``, ``"ERROR"``,
+            ``"CRITICAL"`` (case-insensitive).
         """
         with self._lock:
             if api_key is not None:
@@ -176,6 +208,10 @@ class Config:
                 self._max_retries = int(max_retries)
             if enabled is not None:
                 self._enabled = bool(enabled)
+            if log_level is not None:
+                level = log_level.strip().upper()
+                if level in _LOG_LEVELS:
+                    self._log_level = level
 
     def reset(self) -> None:
         """Reset configuration to defaults and re-read environment variables.
@@ -190,6 +226,7 @@ class Config:
             self._provider = "openai"
             self._max_retries = 3
             self._enabled = True
+            self._log_level = "WARNING"
             self._auto_load()
 
     # ------------------------------------------------------------------ #
@@ -231,6 +268,12 @@ class Config:
         with self._lock:
             return self._provider
 
+    @property
+    def log_level(self) -> str:
+        """The logging level name (e.g. ``"WARNING"``, ``"INFO"``)."""
+        with self._lock:
+            return self._log_level
+
     # ------------------------------------------------------------------ #
     # Debug helpers
     # ------------------------------------------------------------------ #
@@ -240,7 +283,8 @@ class Config:
             return (
                 f"Config(api_key={key_display!r}, model={self._model!r}, "
                 f"provider={self._provider!r}, max_retries={self._max_retries}, "
-                f"enabled={self._enabled}, llm={'custom' if self._llm else None})"
+                f"enabled={self._enabled}, log_level={self._log_level!r}, "
+                f"llm={'custom' if self._llm else None})"
             )
 
 

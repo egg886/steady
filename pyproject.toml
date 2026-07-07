@@ -81,7 +81,7 @@ steady = ["py.typed"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
-src = ["src", "tests"]
+src = ["src", "tests", "examples"]
 
 [tool.ruff.lint]
 select = [
@@ -104,10 +104,17 @@ ignore = [
     "F841",  # Unused variables - steady is designed to handle buggy code
     "F821",  # Undefined names - steady is designed to handle buggy code
 ]
+"examples/*" = [
+    "F841",    # Unused variables - examples intentionally contain bugs for steady to fix
+    "F821",    # Undefined names - examples intentionally contain bugs for steady to fix
+    "RUF001",  # Ambiguous Unicode in strings - Chinese catchphrase is intentional
+    "RUF002",  # Ambiguous Unicode in docstrings - Chinese catchphrase is intentional
+    "RUF003",  # Ambiguous Unicode in comments - Chinese catchphrase is intentional
+]
 
 # MyPy configuration
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_configs = true

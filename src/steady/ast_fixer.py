@@ -17,8 +17,9 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+import types
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable, cast
 
 
 @dataclass
@@ -41,7 +42,9 @@ class ErrorInfo:
 
 
 def analyze_traceback(
-    exc_type, exc_value, exc_tb
+    exc_type: type[BaseException] | None,
+    exc_value: BaseException | None,
+    exc_tb: types.TracebackType | None,
 ) -> ErrorInfo | None:
     """Extract structured error info from a traceback object.
 
@@ -108,13 +111,15 @@ def analyze_traceback(
         )
 
     # Collect all candidate functions that contain the error line
-    candidates: list[ast.FunctionDef] = []
+    candidates: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             start = node.lineno
+            if start is None:
+                continue
             end = (
                 node.end_lineno
-                if getattr(node, "end_lineno", None) is not None
+                if node.end_lineno is not None
                 else start
             )
             if start <= abs_lineno <= end:
@@ -126,7 +131,7 @@ def analyze_traceback(
         start_line = func_node.lineno
         end_line = (
             func_node.end_lineno
-            if getattr(func_node, "end_lineno", None) is not None
+            if func_node.end_lineno is not None
             else start_line
         )
         func_lines = file_lines[start_line - 1 : end_line]
@@ -156,7 +161,7 @@ def analyze_traceback(
     )
 
 
-def get_function_source(func: Callable) -> str | None:
+def get_function_source(func: Callable[..., Any]) -> str | None:
     """Get the source code of a function via :mod:`inspect`.
 
     Returns the function source starting from the ``def`` line (decorators
@@ -247,9 +252,9 @@ class _StatementRemover(ast.NodeTransformer):
 
         return False
 
-    def _process_list(self, items: list) -> list:
+    def _process_list(self, items: list[ast.stmt]) -> list[ast.stmt]:
         """Process a list of AST nodes, removing the target if found."""
-        new_list: list = []
+        new_list: list[ast.stmt] = []
         for item in items:
             if isinstance(item, ast.stmt) and not self.removed:
                 if self._should_remove(item):
@@ -313,8 +318,8 @@ def remove_error_line(source: str, lineno: int) -> str | None:
 def recompile_function(
     source: str,
     func_name: str,
-    globals_dict: dict | None = None,
-) -> Callable:
+    globals_dict: dict[str, Any] | None = None,
+) -> Callable[..., Any]:
     """Recompile a function from source code and return the new callable.
 
     Uses :func:`compile` + :func:`exec` to create a fresh function object.
@@ -340,7 +345,12 @@ def recompile_function(
     exec(code, globals_dict)
 
     if func_name in globals_dict:
-        return globals_dict[func_name]
+        result = globals_dict[func_name]
+        if callable(result):
+            return cast(Callable[..., Any], result)
+        raise NameError(
+            f"'{func_name}' is not callable after recompilation"
+        )
 
     raise NameError(
         f"Function '{func_name}' not found after recompilation"
@@ -348,7 +358,7 @@ def recompile_function(
 
 
 def try_ast_repair(
-    source: str, error_info: ErrorInfo
+    source: str, error_info: ErrorInfo | None
 ) -> tuple[str | None, str]:
     """Try to fix the source using AST manipulation.
 

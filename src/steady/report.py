@@ -15,9 +15,10 @@ Unicode (including CJK) content is preserved verbatim.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 # ---------------------------------------------------------------------- #
 # Risk rating
@@ -118,6 +119,7 @@ class BugReport:
         self._report_id: str = (
             f"STEADY-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         )
+        self._lock = threading.RLock()
 
     def add_entry(self, entry: BugEntry) -> None:
         """Add a bug entry to the report.
@@ -125,7 +127,8 @@ class BugReport:
         Args:
             entry: The :class:`BugEntry` to append.
         """
-        self._entries.append(entry)
+        with self._lock:
+            self._entries.append(entry)
 
     def add_tokens(self, count: int) -> None:
         """Record LLM tokens used.
@@ -133,11 +136,12 @@ class BugReport:
         Args:
             count: Number of tokens to add to the running total.
         """
-        self._total_tokens += count
+        with self._lock:
+            self._total_tokens += count
 
     def export(
         self, format: Literal["markdown", "json", "dict"] = "markdown"
-    ) -> str | dict:
+    ) -> str | dict[str, Any]:
         """Export the full Bug Tour Report.
 
         Uses the tourism metaphor: report_id = ticket, bugs = scenic spots,
@@ -166,7 +170,13 @@ class BugReport:
         Returns:
             The Markdown-formatted Bug Tour Report.
         """
-        resolved_count = sum(1 for e in self._entries if e.resolved)
+        # Snapshot the entries under the lock to avoid race conditions
+        # during the (potentially slow) markdown rendering.
+        with self._lock:
+            entries = list(self._entries)
+            total_tokens = self._total_tokens
+
+        resolved_count = sum(1 for e in entries if e.resolved)
         risk_level = self.risk_level
         risk_emoji, risk_label = _RISK_INFO[risk_level]
         success_rate = self.success_rate
@@ -186,20 +196,20 @@ class BugReport:
         lines.append(
             f"| **Duration** | {self.duration_seconds:.2f}s |"
         )
-        lines.append(f"| **Scenic spots (bugs)** | {self.bug_count} |")
+        lines.append(f"| **Scenic spots (bugs)** | {len(entries)} |")
         lines.append(
-            f"| **Resolved** | {resolved_count} / {self.bug_count} |"
+            f"| **Resolved** | {resolved_count} / {len(entries)} |"
         )
-        if self._total_tokens > 0:
+        if total_tokens > 0:
             lines.append(
-                f"| **LLM tokens used** | {self._total_tokens} |"
+                f"| **LLM tokens used** | {total_tokens} |"
             )
         lines.append(
             f"| **Risk rating** | {risk_emoji} {risk_label} |"
         )
         lines.append("")
 
-        if not self._entries:
+        if not entries:
             lines.append(
                 "\U0001f3b2 *No bugs encountered. "
                 "The tour was uneventful — keep coding!*"
@@ -209,7 +219,7 @@ class BugReport:
         # --- Tour stops ----------------------------------------------
         lines.append("## \U0001f4cd Tour Stops")
         lines.append("")
-        for i, entry in enumerate(self._entries, 1):
+        for i, entry in enumerate(entries, 1):
             status_key = "resolved" if entry.resolved else "unresolved"
             status_emoji = _STATUS_EMOJI[status_key]
             strategy_emoji = _STRATEGY_EMOJI.get(
@@ -240,16 +250,16 @@ class BugReport:
         lines.append("")
         lines.append("| Metric | Value |")
         lines.append("| --- | --- |")
-        lines.append(f"| Total bugs | {self.bug_count} |")
+        lines.append(f"| Total bugs | {len(entries)} |")
         lines.append(f"| Resolved | {resolved_count} |")
         lines.append(
-            f"| Unresolved | {self.bug_count - resolved_count} |"
+            f"| Unresolved | {len(entries) - resolved_count} |"
         )
         lines.append(f"| Fix success rate | {success_rate:.1f}% |")
         lines.append(f"| Average retries | {self.average_retries:.2f} |")
         lines.append(f"| Risk rating | {risk_emoji} {risk_label} |")
-        if self._total_tokens > 0:
-            lines.append(f"| LLM tokens used | {self._total_tokens} |")
+        if total_tokens > 0:
+            lines.append(f"| LLM tokens used | {total_tokens} |")
         lines.append(f"| Duration | {self.duration_seconds:.2f}s |")
         lines.append("")
 
@@ -291,43 +301,46 @@ class BugReport:
         Any *unresolved* bug of a severe type (TypeError, ValueError, ...)
         bumps the level by one tier (capped at ``critical``).
         """
-        if self.bug_count == 0:
-            return "none"
+        with self._lock:
+            if self.bug_count == 0:
+                return "none"
 
-        if self.bug_count <= 2:
-            level = "low"
-        elif self.bug_count <= 5:
-            level = "medium"
-        elif self.bug_count <= 10:
-            level = "high"
-        else:
-            level = "critical"
+            if self.bug_count <= 2:
+                level = "low"
+            elif self.bug_count <= 5:
+                level = "medium"
+            elif self.bug_count <= 10:
+                level = "high"
+            else:
+                level = "critical"
 
-        severity_bump = any(
-            not e.resolved and e.error_type in _SEVERE_ERROR_TYPES
-            for e in self._entries
-        )
-        if severity_bump:
-            order = ["none", "low", "medium", "high", "critical"]
-            idx = min(order.index(level) + 1, len(order) - 1)
-            level = order[idx]
-        return level
+            severity_bump = any(
+                not e.resolved and e.error_type in _SEVERE_ERROR_TYPES
+                for e in self._entries
+            )
+            if severity_bump:
+                order = ["none", "low", "medium", "high", "critical"]
+                idx = min(order.index(level) + 1, len(order) - 1)
+                level = order[idx]
+            return level
 
     @property
     def success_rate(self) -> float:
         """Percentage of bugs that were resolved (``0.0``-``100.0``)."""
-        if self.bug_count == 0:
-            return 100.0
-        resolved = sum(1 for e in self._entries if e.resolved)
-        return (resolved / self.bug_count) * 100.0
+        with self._lock:
+            if self.bug_count == 0:
+                return 100.0
+            resolved = sum(1 for e in self._entries if e.resolved)
+            return (resolved / self.bug_count) * 100.0
 
     @property
     def average_retries(self) -> float:
         """Mean number of retries across all entries."""
-        if self.bug_count == 0:
-            return 0.0
-        total = sum(e.retry_count for e in self._entries)
-        return total / self.bug_count
+        with self._lock:
+            if self.bug_count == 0:
+                return 0.0
+            total = sum(e.retry_count for e in self._entries)
+            return total / self.bug_count
 
     def _count_by_field(self, field_name: str) -> list[tuple[str, int]]:
         """Count entries grouped by a BugEntry field.
@@ -340,68 +353,74 @@ class BugReport:
             A list of ``(value, count)`` tuples sorted by descending
             count.
         """
-        counts: dict[str, int] = {}
-        for entry in self._entries:
-            value = getattr(entry, field_name, "")
-            counts[value] = counts.get(value, 0) + 1
-        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        with self._lock:
+            counts: dict[str, int] = {}
+            for entry in self._entries:
+                value = getattr(entry, field_name, "")
+                counts[value] = counts.get(value, 0) + 1
+            return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
     # ------------------------------------------------------------------
     # Dict / JSON summary
     # ------------------------------------------------------------------
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
         """Return a summary dict of the report.
 
         Includes aggregate metrics (risk level, success rate, average
         retries) alongside the raw entries, so JSON/programmatic consumers
         get the same enriched view as the Markdown export.
         """
-        resolved_count = sum(1 for e in self._entries if e.resolved)
-        return {
-            "report_id": self._report_id,
-            "bug_count": self.bug_count,
-            "resolved": resolved_count,
-            "unresolved": self.bug_count - resolved_count,
-            "success_rate": round(self.success_rate, 2),
-            "average_retries": round(self.average_retries, 2),
-            "risk_level": self.risk_level,
-            "tokens": self._total_tokens,
-            "duration": round(self.duration_seconds, 2),
-            "entries": [
-                {
-                    "error_type": e.error_type,
-                    "location": e.location,
-                    "explanation": e.explanation,
-                    "fix_strategy": e.fix_strategy,
-                    "fix_description": e.fix_description,
-                    "retry_count": e.retry_count,
-                    "resolved": e.resolved,
-                    "timestamp": e.timestamp,
-                }
-                for e in self._entries
-            ],
-        }
+        with self._lock:
+            resolved_count = sum(1 for e in self._entries if e.resolved)
+            return {
+                "report_id": self._report_id,
+                "bug_count": self.bug_count,
+                "resolved": resolved_count,
+                "unresolved": self.bug_count - resolved_count,
+                "success_rate": round(self.success_rate, 2),
+                "average_retries": round(self.average_retries, 2),
+                "risk_level": self.risk_level,
+                "tokens": self._total_tokens,
+                "duration": round(self.duration_seconds, 2),
+                "entries": [
+                    {
+                        "error_type": e.error_type,
+                        "location": e.location,
+                        "explanation": e.explanation,
+                        "fix_strategy": e.fix_strategy,
+                        "fix_description": e.fix_description,
+                        "retry_count": e.retry_count,
+                        "resolved": e.resolved,
+                        "timestamp": e.timestamp,
+                    }
+                    for e in self._entries
+                ],
+            }
 
     def clear(self) -> None:
         """Clear all entries and reset the report."""
-        self._entries = []
-        self._total_tokens = 0
-        self._start_time = datetime.now()
-        self._report_id = (
-            f"STEADY-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        )
+        with self._lock:
+            self._entries = []
+            self._total_tokens = 0
+            self._start_time = datetime.now()
+            self._report_id = (
+                f"STEADY-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            )
 
     @property
     def entries(self) -> list[BugEntry]:
         """The list of recorded :class:`BugEntry` objects."""
-        return self._entries
+        with self._lock:
+            return list(self._entries)
 
     @property
     def bug_count(self) -> int:
         """Total number of bugs recorded."""
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     @property
     def duration_seconds(self) -> float:
         """Seconds elapsed since the report started."""
-        return (datetime.now() - self._start_time).total_seconds()
+        with self._lock:
+            return (datetime.now() - self._start_time).total_seconds()

@@ -415,3 +415,170 @@ def test_zero_bugs_report(enabled_steady):
     d = enabled_steady.report(format="dict")
     assert d["bug_count"] == 0
     assert d["entries"] == []
+
+
+# ---------------------------------------------------------------------- #
+# max_retries exhausted
+# ---------------------------------------------------------------------- #
+def test_max_retries_exceeded(enabled_steady):
+    """When repair attempts exceed ``max_retries``, the original exception
+    should be re-raised and the report should record an unresolved entry.
+
+    With ``max_retries=1`` and two sequential bugs, steady can only remove
+    the first offending line before running out of retries; the second
+    ``NameError`` propagates as the original exception.
+    """
+    enabled_steady.configure(max_retries=1)
+    try:
+
+        @enabled_steady
+        def f():
+            a = undefined_one  # removed on retry 1
+            b = undefined_two  # still fails -> re-raise
+            return 42
+
+        with pytest.raises(NameError):
+            f()
+
+        report = enabled_steady.report(format="dict")
+        assert report["unresolved"] >= 1
+    finally:
+        # Restore the default so subsequent tests are unaffected.
+        enabled_steady.configure(max_retries=3)
+
+
+# ---------------------------------------------------------------------- #
+# Generator function
+# ---------------------------------------------------------------------- #
+def test_decorator_with_generator(enabled_steady):
+    """A decorated generator function should return a usable generator
+    object that iterates normally when there is no bug in the body."""
+
+    @enabled_steady
+    def squares(n):
+        for i in range(n):
+            yield i * i
+
+    gen = squares(3)
+    assert hasattr(gen, "__next__")
+    assert list(gen) == [0, 1, 4]
+    assert enabled_steady.bug_count == 0
+
+
+def test_decorator_with_generator_bug_during_iteration(enabled_steady):
+    """Bugs that fire lazily during iteration are outside the wrapper's
+    try/except, so steady cannot intercept them; they propagate normally."""
+
+    @enabled_steady
+    def gen():
+        yield 1
+        bad = 1 / 0  # fires on the second next() call
+        yield 2
+
+    g = gen()
+    assert next(g) == 1
+    with pytest.raises(ZeroDivisionError):
+        next(g)
+    # steady never saw the error — it occurred during iteration.
+    assert enabled_steady.bug_count == 0
+
+
+# ---------------------------------------------------------------------- #
+# Class & static methods
+# ---------------------------------------------------------------------- #
+def test_decorator_class_method(enabled_steady):
+    """A decorated instance method should be repaired when its body raises."""
+
+    class Calculator:
+        @enabled_steady
+        def divide(self, a, b):
+            debug = 1 / 0  # stray debug line
+            return a / b
+
+    calc = Calculator()
+    assert calc.divide(10, 2) == 5
+    assert enabled_steady.bug_count >= 1
+
+
+def test_decorator_static_method(enabled_steady):
+    """A decorated static method should be repaired when its body raises."""
+
+    class Utility:
+        @staticmethod
+        @enabled_steady
+        def parse(text):
+            debug = undefined_var  # stray debug line
+            return int(text)
+
+    assert Utility.parse("42") == 42
+    assert enabled_steady.bug_count >= 1
+
+
+# ---------------------------------------------------------------------- #
+# Concurrency / thread safety
+# ---------------------------------------------------------------------- #
+def test_concurrent_calls(enabled_steady):
+    """Concurrent calls to a decorated function should be thread-safe:
+    every call returns the correct result and the shared bug report is
+    not corrupted."""
+
+    import threading
+
+    @enabled_steady
+    def compute(x):
+        debug = 1 / 0  # removed on repair
+        return x * 2
+
+    results: list = []
+    errors: list = []
+
+    def worker():
+        try:
+            results.append(compute(21))
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(results) == 8
+    assert all(r == 42 for r in results)
+    assert enabled_steady.bug_count >= 8
+
+
+# ---------------------------------------------------------------------- #
+# Nested decorated functions
+# ---------------------------------------------------------------------- #
+def test_nested_decorated_functions(enabled_steady):
+    """A decorated function defined inside another decorated function
+    should be repaired independently; both bugs are recorded.
+
+    The inner decorator uses the module-level ``steady`` singleton rather
+    than the ``enabled_steady`` fixture: when steady recompiles the outer
+    function's source, the inner ``@`` decorator is preserved in the
+    recompiled code and resolved against the module globals (where
+    ``enabled_steady`` is a pytest fixture and thus not directly callable,
+    but ``steady`` is a real :class:`Steady` instance).
+    """
+
+    @enabled_steady
+    def outer():
+        @steady
+        def inner():
+            debug = 1 / 0  # ZeroDivisionError
+            return "inner"
+
+        noise = undefined_var  # NameError
+        return inner()
+
+    assert outer() == "inner"
+    assert enabled_steady.bug_count >= 2
+
+    report = enabled_steady.report(format="dict")
+    types = {e["error_type"] for e in report["entries"]}
+    assert "ZeroDivisionError" in types
+    assert "NameError" in types

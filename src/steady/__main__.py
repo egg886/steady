@@ -135,6 +135,7 @@ def _print_config() -> int:
     print(f"  model        : {config.model}")
     print(f"  api_key      : {_mask_api_key(config.api_key)}")
     print(f"  max_retries  : {config.max_retries}")
+    print(f"  log_level    : {config.log_level}")
     print(f"  custom llm   : {'yes (callable)' if has_custom_llm else 'no'}")
     print(f"  bug_count    : {instance.bug_count}")
     print("-" * 40)

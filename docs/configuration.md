@@ -16,6 +16,7 @@ tune retry behaviour, and plug in custom LLM backends.
 | `STEADY_PROVIDER`    | `openai`       | `openai` or `anthropic`.                              |
 | `STEADY_MAX_RETRIES` | `3`            | Maximum repair attempts per error.                     |
 | `STEADY_ENABLED`     | `true`         | Master switch (`false`/`0` disables steady).            |
+| `STEADY_LOG_LEVEL`   | `WARNING`      | Logging level for steady's internal logger.            |
 
 ---
 
@@ -33,6 +34,7 @@ export STEADY_PROVIDER="anthropic"   # or "openai" (default)
 export STEADY_MODEL="claude-3-5-sonnet-20241022"
 export STEADY_MAX_RETRIES=5
 export STEADY_ENABLED=true           # set to "false" to disable
+export STEADY_LOG_LEVEL=INFO         # see repairs in real time
 ```
 
 ### API key resolution
@@ -73,6 +75,7 @@ steady.configure(
     provider="openai",     # or "anthropic"
     max_retries=5,
     enabled=True,
+    log_level="INFO",      # see repairs in real time
 )
 ```
 
@@ -249,3 +252,53 @@ If both tiers fail within `max_retries` attempts, steady:
 
 This means steady never silently swallows a bug it could not fix — it always
 leaves a trace in the report and lets the exception propagate.
+
+---
+
+## 7. Logging
+
+steady integrates with Python's standard `logging` module. The logger is
+named `"steady"` and its level is controlled by `STEADY_LOG_LEVEL` or the
+`log_level` parameter of `steady.configure()`.
+
+| Level      | What gets logged                                        |
+| ---------- | -------------------------------------------------------- |
+| `DEBUG`    | Detailed repair info (function source, error analysis). |
+| `INFO`     | Bug caught, repair attempted, repair succeeded/failed.  |
+| `WARNING`  *(default)* | Repair could not be completed — re-raising. |
+| `ERROR`    | Same as WARNING.                                         |
+| `CRITICAL` | Same as WARNING.                                         |
+
+By default (`WARNING`), steady is silent in the happy path — no log output
+unless a repair fails. Set `STEADY_LOG_LEVEL=INFO` to see every repair:
+
+```bash
+export STEADY_LOG_LEVEL=INFO
+python your_script.py
+```
+
+Example output:
+
+```
+2026-07-07 12:00:00,000 [steady] INFO: Bug caught in 'divide': ZeroDivisionError: division by zero — attempting repair (max_retries=3)
+2026-07-07 12:00:00,001 [steady] INFO: AST repair succeeded for 'divide' on retry 1 (strategy: remove_statement)
+```
+
+Or configure it programmatically:
+
+```python
+from steady import steady
+
+steady.configure(log_level="INFO")
+```
+
+steady ensures its logger has at least one `StreamHandler` so messages are
+visible even without calling `logging.basicConfig()`. You can also access
+the logger directly for advanced integration:
+
+```python
+import logging
+
+steady_logger = logging.getLogger("steady")
+steady_logger.setLevel(logging.DEBUG)
+```

@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import functools
 import inspect
+import logging
 import sys
 import traceback as tb_module
-from typing import Any, Callable
+import types
+from typing import Any, Callable, Literal
 
 from .ast_fixer import (
     ErrorInfo,
@@ -38,6 +40,8 @@ from .config import Config, get_config
 from .hooks import install_import_hook
 from .llm import LLMRepairResult, create_llm_client
 from .report import BugEntry, BugReport
+
+logger = logging.getLogger("steady")
 
 
 class Steady:
@@ -68,6 +72,24 @@ class Steady:
         self._report: BugReport = BugReport()
         self._llm = create_llm_client(self._config)
         self._prev_excepthook = sys.excepthook
+        self._apply_log_level()
+
+    def _apply_log_level(self) -> None:
+        """Apply the configured log level to the ``steady`` logger.
+
+        Ensures the logger has at least one handler so messages are not lost
+        when the root logger is not configured (e.g. in scripts without
+        ``logging.basicConfig``).
+        """
+        level_name = self._config.log_level
+        level = getattr(logging, level_name, logging.WARNING)
+        logger.setLevel(level)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s [steady] %(levelname)s: %(message)s")
+            )
+            logger.addHandler(handler)
 
     # ------------------------------------------------------------------
     # Configuration
@@ -84,12 +106,13 @@ class Steady:
         """
         self._config.configure(**kwargs)
         self._llm = create_llm_client(self._config)
+        self._apply_log_level()
 
     # ------------------------------------------------------------------
     # __call__ — decorator / import hook
     # ------------------------------------------------------------------
     def __call__(
-        self, func: str | Callable | None = None
+        self, func: str | Callable[..., Any] | None = None
     ) -> Any:
         """Use steady as a decorator or import hook.
 
@@ -136,7 +159,12 @@ class Steady:
         sys.excepthook = lambda *args: None  # Suppress default handler
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
+    ) -> bool:
         """Exit the ``with steady:`` context.
 
         Restores the original ``sys.excepthook``.  If an exception
@@ -161,7 +189,9 @@ class Steady:
     # ------------------------------------------------------------------
     # Report
     # ------------------------------------------------------------------
-    def report(self, format: str = "markdown") -> Any:
+    def report(
+        self, format: Literal["markdown", "json", "dict"] = "markdown"
+    ) -> str | dict[str, Any]:
         """Export the Bug Tour Report.
 
         Args:
@@ -181,7 +211,7 @@ class Steady:
     # ------------------------------------------------------------------
     # Internal: decoration
     # ------------------------------------------------------------------
-    def _decorate(self, func: Callable) -> Callable:
+    def _decorate(self, func: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap a function with steady error handling.
 
         The wrapper tries to call the original function.  On exception,
@@ -212,10 +242,10 @@ class Steady:
     # ------------------------------------------------------------------
     def _handle_function_error(
         self,
-        func: Callable,
+        func: Callable[..., Any],
         exc: Exception,
-        args: tuple,
-        kwargs: dict,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> Any:
         """Core repair logic for decorated functions.
 
@@ -248,9 +278,23 @@ class Steady:
         max_retries: int = self._config.max_retries
         retry_count: int = 0
 
+        logger.info(
+            "Bug caught in '%s': %s: %s — attempting repair "
+            "(max_retries=%d)",
+            func.__name__,
+            type(exc).__name__,
+            exc,
+            max_retries,
+        )
+
         # --- Step 1: Get the original function source ---
         current_source: str | None = get_function_source(func)
         if current_source is None:
+            logger.warning(
+                "Could not retrieve source for '%s' — re-raising %s",
+                func.__name__,
+                type(exc).__name__,
+            )
             raise exc
 
         # --- Step 2: Analyse the traceback ---
@@ -283,6 +327,13 @@ class Steady:
 
                 if success:
                     # The fix worked!
+                    logger.info(
+                        "AST repair succeeded for '%s' on retry %d "
+                        "(strategy: %s)",
+                        func.__name__,
+                        retry_count,
+                        ast_strategy,
+                    )
                     self._report.add_entry(
                         BugEntry(
                             error_type=type(current_exc).__name__,
@@ -337,6 +388,14 @@ class Steady:
                     )
 
                     if success:
+                        logger.info(
+                            "LLM repair succeeded for '%s' on retry %d "
+                            "(strategy: %s, tokens: %d)",
+                            func.__name__,
+                            retry_count,
+                            llm_result.strategy,
+                            llm_result.tokens_used,
+                        )
                         self._report.add_entry(
                             BugEntry(
                                 error_type=type(current_exc).__name__,
@@ -382,6 +441,14 @@ class Steady:
         # ------------------------------------------------------------------
         # All repair attempts failed — record and re-raise
         # ------------------------------------------------------------------
+        logger.warning(
+            "All %d repair attempt(s) failed for '%s' (%s: %s) — "
+            "re-raising original exception",
+            retry_count,
+            func.__name__,
+            type(exc).__name__,
+            exc,
+        )
         self._report.add_entry(
             BugEntry(
                 error_type=type(exc).__name__,
@@ -401,13 +468,20 @@ class Steady:
     # Internal: block exception handler (context manager)
     # ------------------------------------------------------------------
     def _handle_block_exception(
-        self, exc_type, exc_val, exc_tb
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
     ) -> bool:
         """Handle exceptions from ``with steady:`` blocks.
 
         Simplified version: analyses the traceback, attempts AST repair
         on the enclosing function/module source.  Returns ``True``
         (suppress) if the repair succeeds, ``False`` (re-raise) otherwise.
+
+        If the AST repair itself raises an unexpected exception, the
+        original exception is preserved and re-raised rather than being
+        swallowed.
 
         Args:
             exc_type: The exception class.
@@ -420,29 +494,57 @@ class Steady:
         if not self._config.enabled:
             return False
 
-        error_info = analyze_traceback(exc_type, exc_val, exc_tb)
+        logger.info(
+            "Bug caught in with-steady block: %s: %s — attempting repair",
+            exc_type.__name__ if exc_type else "Unknown",
+            exc_val,
+        )
 
-        location = self._build_location_string(error_info, exc_val)
+        error_info: ErrorInfo | None = None
+        location: str = "unknown"
 
-        if error_info is not None and error_info.source:
-            fixed_source, strategy = try_ast_repair(
-                error_info.source, error_info
-            )
-            if fixed_source is not None:
-                self._report.add_entry(
-                    BugEntry(
-                        error_type=error_info.error_type,
-                        location=location,
-                        explanation=str(exc_val),
-                        fix_strategy="ast_repair",
-                        fix_description=strategy,
-                        retry_count=1,
-                        resolved=True,
-                    )
+        try:
+            error_info = analyze_traceback(exc_type, exc_val, exc_tb)
+
+            location = self._build_location_string(error_info, exc_val)
+
+            if error_info is not None and error_info.source:
+                fixed_source, strategy = try_ast_repair(
+                    error_info.source, error_info
                 )
-                return True
+                if fixed_source is not None:
+                    logger.info(
+                        "AST repair succeeded in with-steady block "
+                        "(strategy: %s)",
+                        strategy,
+                    )
+                    self._report.add_entry(
+                        BugEntry(
+                            error_type=error_info.error_type,
+                            location=location,
+                            explanation=str(exc_val),
+                            fix_strategy="ast_repair",
+                            fix_description=strategy,
+                            retry_count=1,
+                            resolved=True,
+                        )
+                    )
+                    return True
+        except Exception:
+            logger.warning(
+                "AST repair failed in block handler — "
+                "preserving original exception",
+                exc_info=True,
+            )
+            # Fall through with whatever info we have; do NOT re-analyse
+            # here because that could raise again and swallow the
+            # original exception.
 
         # Could not repair — record and let the exception propagate
+        logger.warning(
+            "Could not repair %s in with-steady block — re-raising",
+            exc_type.__name__ if exc_type else "Unknown",
+        )
         self._report.add_entry(
             BugEntry(
                 error_type=(
@@ -463,7 +565,9 @@ class Steady:
     # ------------------------------------------------------------------
     # Internal: module syntax error handler (called by hooks)
     # ------------------------------------------------------------------
-    def _handle_module_syntax_error(self, module, exc: SyntaxError) -> None:
+    def _handle_module_syntax_error(
+        self, module: types.ModuleType, exc: SyntaxError
+    ) -> None:
         """Record a syntax error encountered during module import.
 
         Args:
@@ -491,7 +595,7 @@ class Steady:
     # ==================================================================
 
     @staticmethod
-    def _get_tb_lineno(tb) -> int:
+    def _get_tb_lineno(tb: types.TracebackType | None) -> int:
         """Walk to the innermost frame and return its line number.
 
         Args:
@@ -559,9 +663,9 @@ class Steady:
         source: str | None,
         error_info: ErrorInfo | None,
         exc: Exception,
-        func: Callable,
-        args: tuple,
-        kwargs: dict,
+        func: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> LLMRepairResult | None:
         """Attempt LLM repair on the current source.
 
@@ -597,6 +701,13 @@ class Steady:
         except (ValueError, TypeError):
             sig = "<unknown>"
 
+        logger.debug(
+            "LLM repair request: func=%s, error=%s: %s",
+            func.__name__,
+            error_type,
+            error_msg,
+        )
+
         return self._llm.repair(
             source=source,
             error_type=error_type,
@@ -613,9 +724,9 @@ class Steady:
     @staticmethod
     def _try_recompile_and_execute(
         source: str,
-        func: Callable,
-        args: tuple,
-        kwargs: dict,
+        func: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> tuple[bool, Any, Exception | None]:
         """Recompile *source* and try executing it.
 
@@ -641,7 +752,7 @@ class Steady:
 
     @staticmethod
     def _refresh_error_info(
-        exc: Exception,
+        exc: Exception | None,
         current_source: str,
         func_name: str,
     ) -> ErrorInfo | None:
@@ -658,14 +769,18 @@ class Steady:
         so that the next AST-repair attempt can work correctly.
 
         Args:
-            exc: The new exception from the re-execution.
+            exc: The new exception from the re-execution (may be ``None``
+                if the execution failed without raising).
             current_source: The source that was compiled.
             func_name: The function name for the report.
 
         Returns:
-            A refreshed :class:`ErrorInfo`, or ``None`` if the exception
-            has no traceback.
+            A refreshed :class:`ErrorInfo`, or ``None`` if *exc* is
+            ``None``.
         """
+        if exc is None:
+            return None
+
         error_info = analyze_traceback(
             type(exc), exc, exc.__traceback__
         )

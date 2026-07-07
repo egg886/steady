@@ -108,8 +108,9 @@ python -m steady test      # run a quick self-test demonstrating repair
 
 | Document                                      | Contents                                            |
 | --------------------------------------------- | --------------------------------------------------- |
-| [Configuration guide](configuration.md)       | Environment variables, programmatic config, custom LLM backends. |
+| [Configuration guide](configuration.md)       | Environment variables, programmatic config, custom LLM backends, logging. |
 | [API reference](api.md)                       | Detailed reference for every public class and method. |
+| [Examples](examples.md)                       | Real-world scenarios with full code and expected output. |
 | [README](../README.md)                        | Project overview, install, and quick start.         |
 | [Changelog](../CHANGELOG.md)                  | Release history.                                   |
 | [Contributing](../CONTRIBUTING.md)            | How to set up a dev environment and contribute.      |

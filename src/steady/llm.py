@@ -22,10 +22,14 @@ backward compatibility with custom callables that return raw source.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from .config import Config, get_config
+
+logger = logging.getLogger("steady")
 
 #: System prompt reused across all backends. Describes the assistant role,
 #: the JSON contract, and the constraints (minimal patch, no extra prose).
@@ -121,7 +125,7 @@ class LLMClient:
         error_type: str,
         error_msg: str,
         traceback_str: str,
-        context: dict | None = None,
+        context: dict[str, Any] | None = None,
     ) -> LLMRepairResult | None:
         """Send code + error to the LLM and get back a fix.
 
@@ -142,6 +146,7 @@ class LLMClient:
         """
         # Check if we have any LLM backend configured
         if self._config.llm_client is not None:
+            logger.debug("LLM repair: calling custom callable backend")
             prompt = self._build_prompt(
                 source, error_type, error_msg, traceback_str, context
             )
@@ -149,11 +154,17 @@ class LLMClient:
                 response, tokens = self._call_custom(prompt)
                 return self._parse_response(response, tokens)
             except Exception:
+                logger.debug("LLM repair: custom callable raised", exc_info=True)
                 return None
 
         if not self._config.api_key:
             return None
 
+        logger.debug(
+            "LLM repair: calling %s backend (model=%s)",
+            self._config.provider,
+            self._config.model,
+        )
         prompt = self._build_prompt(
             source, error_type, error_msg, traceback_str, context
         )
@@ -168,6 +179,9 @@ class LLMClient:
 
             return self._parse_response(response, tokens)
         except Exception:
+            logger.debug(
+                "LLM repair: %s backend raised", self._config.provider, exc_info=True
+            )
             return None
 
     # ------------------------------------------------------------------
@@ -179,7 +193,7 @@ class LLMClient:
         error_type: str,
         error_msg: str,
         traceback_str: str,
-        context: dict | None,
+        context: dict[str, Any] | None,
     ) -> str:
         """Build the user prompt sent to the LLM.
 
@@ -228,7 +242,7 @@ class LLMClient:
         )
 
     @staticmethod
-    def _format_context(context: dict | None) -> str:
+    def _format_context(context: dict[str, Any] | None) -> str:
         """Format the runtime context dict into a prompt section.
 
         Args:
@@ -297,7 +311,12 @@ class LLMClient:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = message.content[0].text if message.content else ""
+        # message.content is a list of content blocks (TextBlock,
+        # ThinkingBlock, ToolUseBlock, etc.). Only TextBlock has a
+        # ``text`` attribute, so use getattr for safe access.
+        text = ""
+        if message.content:
+            text = getattr(message.content[0], "text", "") or ""
         tokens = message.usage.input_tokens + message.usage.output_tokens
         return text, tokens
 
@@ -317,7 +336,10 @@ class LLMClient:
         # Prepend the system prompt so custom backends also see the role
         # description and the JSON contract.
         full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
-        result = self._config.llm_client(full_prompt)
+        llm = self._config.llm_client
+        if llm is None:
+            raise RuntimeError("No custom LLM callable configured")
+        result = llm(full_prompt)
         if isinstance(result, tuple):
             return result
         if isinstance(result, str):
@@ -371,7 +393,7 @@ class LLMClient:
         )
 
     @staticmethod
-    def _extract_json(text: str) -> dict | None:
+    def _extract_json(text: str) -> dict[str, Any] | None:
         """Extract the first JSON object found in *text*.
 
         Handles three shapes:
@@ -406,8 +428,12 @@ class LLMClient:
         return None
 
     @staticmethod
-    def _find_first_json_object(text: str) -> dict | None:
+    def _find_first_json_object(text: str) -> dict[str, Any] | None:
         """Find and parse the first balanced ``{...}`` object in *text*.
+
+        If the first candidate fails to parse, subsequent ``{...}`` objects
+        are tried so that explanatory prose before the JSON (or multiple
+        objects) does not prevent extraction.
 
         Args:
             text: Text that may contain a JSON object.
@@ -415,43 +441,53 @@ class LLMClient:
         Returns:
             The parsed dict, or ``None`` if no valid object is found.
         """
-        start = text.find("{")
-        if start == -1:
-            return None
+        search_start = 0
+        while True:
+            start = text.find("{", search_start)
+            if start == -1:
+                return None
 
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif char == "\\":
-                    escape = True
-                elif char == '"':
-                    in_string = False
-            else:
-                if char == '"':
-                    in_string = True
-                elif char == "{":
-                    depth += 1
-                elif char == "}":
-                    depth -= 1
-                    if depth == 0:
-                        snippet = text[start : index + 1]
-                        try:
-                            parsed = json.loads(snippet)
-                        except (ValueError, TypeError):
-                            return None
-                        if isinstance(parsed, dict):
-                            return parsed
-                        return None
-        return None
+            depth = 0
+            in_string = False
+            escape = False
+            found = False
+            for index in range(start, len(text)):
+                char = text[index]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == '"':
+                        in_string = False
+                else:
+                    if char == '"':
+                        in_string = True
+                    elif char == "{":
+                        depth += 1
+                    elif char == "}":
+                        depth -= 1
+                        if depth == 0:
+                            snippet = text[start : index + 1]
+                            try:
+                                parsed = json.loads(snippet)
+                            except (ValueError, TypeError):
+                                # Try the next { ... } object
+                                search_start = index + 1
+                                found = True
+                                break
+                            if isinstance(parsed, dict):
+                                return parsed
+                            search_start = index + 1
+                            found = True
+                            break
+            if not found:
+                # Ran off the end without finding a balanced object
+                return None
 
     @staticmethod
     def _result_from_json(
-        obj: dict, tokens: int
+        obj: dict[str, Any], tokens: int
     ) -> LLMRepairResult | None:
         """Build an :class:`LLMRepairResult` from a parsed JSON dict.
 

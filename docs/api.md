@@ -67,7 +67,17 @@ Use steady as a decorator or import hook.
 | --------- | ----------------------------- | ----------------------------------------------- |
 | `func`    | `Callable \| str \| None`     | Callable to decorate, module name, or `None`.   |
 
-**Returns:** the decorated wrapper, the imported module, or `self`.
+**Returns:**
+- When decorating a function: the wrapped callable.
+- When passed a module name string: the imported `ModuleType` (with
+  steady's import hook active).
+- When called with no arguments: `self` (the `Steady` instance).
+
+**Raises:**
+- `ImportError` — if the module name cannot be found (after steady
+  attempts repair on syntax/import errors).
+- The original exception is re-raised if steady cannot repair a
+  decorated function within `max_retries` attempts.
 
 ### `Steady.__enter__()` / `Steady.__exit__(...)`
 
@@ -92,7 +102,23 @@ Export the Bug Tour Report.
 | --------- | ------------------------------------- | ------------ | --------------------------------- |
 | `format`  | `"markdown" \| "json" \| "dict"`      | `"markdown"` | Output format.                    |
 
-**Returns:** a string (markdown/json) or a dict.
+**Returns:**
+- `"markdown"`: a Markdown-formatted string with emoji icons, ticket
+  table, per-stop details, and a summary section.
+- `"json"`: a JSON string (same structure as `"dict"`).
+- `"dict"`: a Python `dict` with keys `report_id`, `bug_count`,
+  `resolved`, `unresolved`, `success_rate`, `average_retries`,
+  `risk_level`, `tokens`, `duration`, and `entries`.
+
+**Raises:** Nothing — safe to call at any time.
+
+**Example:**
+
+```python
+print(steady.report())           # Markdown to stdout
+print(steady.report("json"))     # JSON string
+data = steady.report("dict")     # Python dict for pipelines
+```
 
 ### `Steady.bug_count`
 
@@ -120,8 +146,9 @@ mutations are thread-safe.
 | `STEADY_PROVIDER`    | `openai`       | `openai` or `anthropic`.                              |
 | `STEADY_MAX_RETRIES` | `3`            | Maximum repair attempts per error.                     |
 | `STEADY_ENABLED`     | `true`         | Master switch (`false`/`0` disables steady).            |
+| `STEADY_LOG_LEVEL`   | `WARNING`      | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 
-### `Config.configure(*, api_key=None, model=None, llm=None, provider=None, max_retries=None, enabled=None)`
+### `Config.configure(*, api_key=None, model=None, llm=None, provider=None, max_retries=None, enabled=None, log_level=None)`
 
 Programmatically update configuration. Only provided (non-`None`) keyword
 arguments are applied; existing values are preserved otherwise.
@@ -134,6 +161,20 @@ arguments are applied; existing values are preserved otherwise.
 | `provider`   | `str \| None`    | `"openai"` or `"anthropic"`.                                 |
 | `max_retries`| `int \| None`    | Maximum repair attempts per error.                           |
 | `enabled`    | `bool \| None`   | Master switch. `False` disables steady entirely.            |
+| `log_level`  | `str \| None`    | Logging level: `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
+
+**Returns:** `None`.
+
+**Example:**
+
+```python
+steady.configure(
+    api_key="sk-...",
+    model="gpt-4o",
+    max_retries=5,
+    log_level="INFO",
+)
+```
 
 ### `Config.reset()`
 
@@ -150,6 +191,7 @@ callable.
 | `enabled`   | `bool`      | Whether steady's error handling is active.           |
 | `llm_client`| `Callable \| None` | A custom LLM callable, or `None`.             |
 | `provider`  | `str`       | `"openai"` or `"anthropic"`.                        |
+| `log_level` | `str`       | Logging level name (e.g. `"WARNING"`, `"INFO"`).    |
 
 ### `get_config()`
 
@@ -305,6 +347,57 @@ Result of an LLM repair attempt. Dataclass fields:
 | `strategy`     | `str`  | Repair strategy tag (`remove_line`, `fix_value`, etc.).          |
 | `success`      | `bool` | Whether the LLM produced a valid fix.                            |
 | `tokens_used`  | `int`  | Tokens consumed by the call (default `0`).                        |
+
+---
+
+## Logging
+
+steady integrates with Python's standard `logging` module. The logger is
+named `"steady"` and its level is controlled by the
+[`STEADY_LOG_LEVEL`](#environment-variables) environment variable or the
+[`log_level`](#configconfigure) parameter of `Config.configure()`.
+
+| Log level | What steady logs                                          |
+| --------- | --------------------------------------------------------- |
+| `DEBUG`   | Detailed repair info (function source, error analysis).  |
+| `INFO`    | Bug caught, repair attempted, repair succeeded/failed.    |
+| `WARNING` | A repair could not be completed — re-raising exception.  |
+| `ERROR`   *(default)* | *(same as WARNING)*                            |
+| `CRITICAL` | *(same as WARNING)*                                      |
+
+By default (`WARNING`), steady is silent in the happy path — no log output
+unless a repair fails. Set `STEADY_LOG_LEVEL=INFO` to see every repair in
+real time:
+
+```bash
+export STEADY_LOG_LEVEL=INFO
+python your_script.py
+```
+
+Or programmatically:
+
+```python
+from steady import steady
+
+steady.configure(log_level="INFO")
+```
+
+steady ensures its logger has at least one `StreamHandler` so messages are
+visible even when the application has not called `logging.basicConfig()`.
+The log format is:
+
+```
+2026-07-07 12:00:00,000 [steady] INFO: Bug caught in 'divide': ...
+```
+
+You can also access the logger directly for advanced integration:
+
+```python
+import logging
+
+steady_logger = logging.getLogger("steady")
+steady_logger.setLevel(logging.DEBUG)
+```
 
 ---
 

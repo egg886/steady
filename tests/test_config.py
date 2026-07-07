@@ -18,12 +18,14 @@ def test_env_var_loading(monkeypatch):
     monkeypatch.setenv("STEADY_MODEL", "gpt-4o")
     monkeypatch.setenv("STEADY_PROVIDER", "anthropic")
     monkeypatch.setenv("STEADY_MAX_RETRIES", "7")
+    monkeypatch.setenv("STEADY_LOG_LEVEL", "DEBUG")
 
     config = Config()
     assert config.api_key == "env-key-123"
     assert config.model == "gpt-4o"
     assert config.provider == "anthropic"
     assert config.max_retries == 7
+    assert config.log_level == "DEBUG"
 
 
 def test_env_var_defaults(monkeypatch):
@@ -34,6 +36,7 @@ def test_env_var_defaults(monkeypatch):
     monkeypatch.delenv("STEADY_PROVIDER", raising=False)
     monkeypatch.delenv("STEADY_MAX_RETRIES", raising=False)
     monkeypatch.delenv("STEADY_ENABLED", raising=False)
+    monkeypatch.delenv("STEADY_LOG_LEVEL", raising=False)
 
     config = Config()
     assert config.api_key is None
@@ -41,6 +44,7 @@ def test_env_var_defaults(monkeypatch):
     assert config.provider == "openai"
     assert config.max_retries == 3
     assert config.enabled is True
+    assert config.log_level == "WARNING"
 
 
 def test_api_key_fallback_to_openai(monkeypatch):
@@ -121,6 +125,45 @@ def test_configure_provider():
 
 
 # ---------------------------------------------------------------------- #
+# Log level
+# ---------------------------------------------------------------------- #
+def test_log_level_env_var(monkeypatch):
+    """STEADY_LOG_LEVEL should be read and upper-cased."""
+    monkeypatch.setenv("STEADY_LOG_LEVEL", "info")
+    config = Config()
+    assert config.log_level == "INFO"
+
+
+def test_log_level_env_var_invalid(monkeypatch):
+    """Invalid STEADY_LOG_LEVEL should fall back to the default."""
+    monkeypatch.setenv("STEADY_LOG_LEVEL", "VERBOSE")
+    config = Config()
+    assert config.log_level == "WARNING"
+
+
+def test_configure_log_level():
+    """configure(log_level=...) should update the log level."""
+    config = Config()
+    config.configure(log_level="DEBUG")
+    assert config.log_level == "DEBUG"
+
+
+def test_configure_log_level_case_insensitive():
+    """configure(log_level=...) should be case-insensitive."""
+    config = Config()
+    config.configure(log_level="error")
+    assert config.log_level == "ERROR"
+
+
+def test_configure_log_level_invalid():
+    """Invalid log_level should be silently ignored."""
+    config = Config()
+    original = config.log_level
+    config.configure(log_level="VERBOSE")
+    assert config.log_level == original
+
+
+# ---------------------------------------------------------------------- #
 # Reset
 # ---------------------------------------------------------------------- #
 def test_reset(monkeypatch):
@@ -129,14 +172,16 @@ def test_reset(monkeypatch):
     monkeypatch.delenv("STEADY_MODEL", raising=False)
 
     config = Config()
-    config.configure(api_key="override", model="custom-model")
+    config.configure(api_key="override", model="custom-model", log_level="DEBUG")
     assert config.api_key == "override"
     assert config.model == "custom-model"
+    assert config.log_level == "DEBUG"
 
     config.reset()
     # After reset, should read from env again
     assert config.api_key == "env-key"
     assert config.model == "gpt-4o-mini"  # default
+    assert config.log_level == "WARNING"  # default
 
 
 def test_reset_clears_llm():

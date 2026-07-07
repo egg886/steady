@@ -11,6 +11,9 @@ import importlib.abc
 import importlib.machinery
 import importlib.util
 import sys
+import types
+from collections.abc import Sequence
+from typing import Any
 
 
 class SteadyLoader(importlib.abc.Loader):
@@ -20,18 +23,25 @@ class SteadyLoader(importlib.abc.Loader):
     so that ``SyntaxError`` and ``ImportError`` can be caught and retried.
     """
 
-    def __init__(self, steady_instance, original_loader, spec) -> None:
+    def __init__(
+        self,
+        steady_instance: Any,
+        original_loader: importlib.abc.Loader,
+        spec: importlib.machinery.ModuleSpec,
+    ) -> None:
         self._steady = steady_instance
         self._original_loader = original_loader
         self._spec = spec
 
-    def create_module(self, spec):
+    def create_module(
+        self, spec: importlib.machinery.ModuleSpec
+    ) -> types.ModuleType | None:
         """Delegate module creation to the original loader."""
         if hasattr(self._original_loader, "create_module"):
             return self._original_loader.create_module(spec)
         return None  # Use default module creation
 
-    def exec_module(self, module):
+    def exec_module(self, module: types.ModuleType) -> None:
         """Execute the module with error handling.
 
         On ``SyntaxError``, attempts to read and fix the source file, then
@@ -56,11 +66,16 @@ class SteadyMetaFinder(importlib.abc.MetaPathFinder):
     :class:`SteadyLoader`.
     """
 
-    def __init__(self, steady_instance, module_name: str) -> None:
+    def __init__(self, steady_instance: Any, module_name: str) -> None:
         self._steady = steady_instance
         self._module_name = module_name
 
-    def find_spec(self, fullname, path, target=None):
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None,
+        target: types.ModuleType | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
         """Find the module spec and wrap its loader."""
         if fullname != self._module_name:
             return None
@@ -89,7 +104,7 @@ class SteadyMetaFinder(importlib.abc.MetaPathFinder):
 _registered_hooks: dict[str, SteadyMetaFinder] = {}
 
 
-def install_import_hook(steady_instance, module_name: str) -> None:
+def install_import_hook(steady_instance: Any, module_name: str) -> None:
     """Install an import hook for the given module name.
 
     After installation, ``importlib.import_module(module_name)`` will be
