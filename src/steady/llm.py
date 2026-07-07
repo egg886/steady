@@ -5,15 +5,73 @@ Supports OpenAI, Anthropic, and custom callable backends.
 
 Without an API key, :meth:`LLMClient.repair` returns ``None`` — steady
 falls back to AST-only repair.
+
+The prompt asks the model to return a **JSON object** with the shape::
+
+    {
+        "fixed_code": "...",
+        "explanation": "...",
+        "strategy": "..."
+    }
+
+so that steady can record a meaningful, human-readable explanation in the
+Bug Tour Report. Older plain-code responses are still accepted for
+backward compatibility with custom callables that return raw source.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
 
 from .config import Config, get_config
+
+#: System prompt reused across all backends. Describes the assistant role,
+#: the JSON contract, and the constraints (minimal patch, no extra prose).
+SYSTEM_PROMPT: str = (
+    "You are an expert Python code repair assistant integrated into "
+    "`steady`, an AI-native fault-tolerant runtime.\n"
+    "\n"
+    "Your job: given a function that raised an exception, return the "
+    "minimal source-code patch that makes the function run successfully "
+    "while preserving its original intent and return value.\n"
+    "\n"
+    "Rules:\n"
+    "1. Output ONLY a single JSON object. No markdown, no code fences, "
+    "no commentary outside the JSON.\n"
+    "2. The JSON must have exactly these keys:\n"
+    '   - "fixed_code": the complete repaired function source (a valid '
+    "Python `def` statement, starting from `def`).\n"
+    '   - "explanation": a short, human-readable description of what was '
+    "wrong and how you fixed it. Keep it under 2 sentences.\n"
+    '   - "strategy": a compact tag for the repair technique, one of: '
+    '"remove_line", "fix_value", "add_import", "fix_syntax", '
+    '"add_guard", "rewrite_logic", "other".\n'
+    "3. Make the smallest possible change. Do not refactor unrelated "
+    "code, rename variables, or alter the function signature.\n"
+    "4. Keep the function name identical to the original so steady can "
+    "recompile and re-execute it.\n"
+    "5. If the error message is in a non-English language (e.g. Chinese), "
+    "treat it as a normal Python exception message — match it to the "
+    "standard Python error type and fix accordingly. You may write the "
+    "`explanation` in the same language as the error message.\n"
+    "6. Never include `import steady` or steady-specific calls in the "
+    "fixed code.\n"
+)
+
+#: Template describing the required JSON output contract, appended to the
+#: user prompt so models that ignore the system message still comply.
+JSON_CONTRACT: str = (
+    "Respond with ONLY this JSON shape (no markdown fences, no extra "
+    "text):\n"
+    "{\n"
+    '  "fixed_code": "<complete repaired function source>",\n'
+    '  "explanation": "<what was wrong and how you fixed it>",\n'
+    '  "strategy": "<remove_line|fix_value|add_import|fix_syntax|'
+    'add_guard|rewrite_logic|other>"\n'
+    "}\n"
+)
 
 
 @dataclass
@@ -44,7 +102,13 @@ class LLMClient:
     ``None``.
     """
 
-    def __init__(self, config: Optional[Config] = None) -> None:
+    def __init__(self, config: Config | None = None) -> None:
+        """Initialise the client.
+
+        Args:
+            config: Optional :class:`Config` instance. Defaults to the
+                process-wide singleton returned by :func:`get_config`.
+        """
         self._config = config or get_config()
 
     # ------------------------------------------------------------------
@@ -57,18 +121,21 @@ class LLMClient:
         error_type: str,
         error_msg: str,
         traceback_str: str,
-        context: Optional[dict] = None,
-    ) -> Optional[LLMRepairResult]:
+        context: dict | None = None,
+    ) -> LLMRepairResult | None:
         """Send code + error to the LLM and get back a fix.
 
-        Returns ``None`` if no API key or custom callable is configured.
+        Returns ``None`` if no API key or custom callable is configured,
+        or if the backend raises an error.
 
         Args:
             source: The source code that caused the error.
             error_type: The exception class name.
-            error_msg: The exception message.
+            error_msg: The exception message (may be in any language,
+                including Chinese).
             traceback_str: Formatted traceback string.
-            context: Additional context (function name, args, etc.).
+            context: Additional context (function name, signature, args,
+                kwargs, etc.).
 
         Returns:
             An :class:`LLMRepairResult` if successful, ``None`` otherwise.
@@ -112,31 +179,87 @@ class LLMClient:
         error_type: str,
         error_msg: str,
         traceback_str: str,
-        context: Optional[dict],
+        context: dict | None,
     ) -> str:
-        """Build the prompt sent to the LLM."""
-        context_str = ""
-        if context:
-            context_str = "\n".join(
-                f"  {k}: {v}" for k, v in context.items()
-            )
+        """Build the user prompt sent to the LLM.
+
+        The prompt bundles the failing source, the exception (type, message
+        and traceback) and any runtime context (function name, signature,
+        argument values). Error messages in any language — including
+        Chinese — are passed through verbatim so the model can match them
+        against the standard Python error type.
+
+        Args:
+            source: The failing function source.
+            error_type: The exception class name.
+            error_msg: The exception message (any language).
+            traceback_str: Formatted traceback string.
+            context: Optional dict of extra context.
+
+        Returns:
+            The fully assembled user prompt string.
+        """
+        context_str = self._format_context(context)
 
         return (
-            "You are a Python code repair assistant. Fix the following code "
-            "so it runs without errors.\n\n"
-            f"Error: {error_type}: {error_msg}\n\n"
-            f"Traceback:\n{traceback_str}\n\n"
-            f"Source code:\n```python\n{source}\n```\n\n"
-            f"Context:\n{context_str}\n\n"
-            "Return ONLY the fixed Python code. No explanations, no markdown "
-            "fences. Just the code."
+            "Repair the following Python function so it runs without "
+            "errors. Keep the change minimal and preserve the function "
+            "name and signature.\n"
+            "\n"
+            f"## Exception\n"
+            f"- Type: {error_type}\n"
+            f"- Message: {error_msg}\n"
+            "\n"
+            f"## Traceback\n"
+            f"```\n{traceback_str}\n```\n"
+            "\n"
+            f"## Failing source code\n"
+            f"```python\n{source}\n```\n"
+            f"{context_str}"
+            "\n"
+            "## Requirements\n"
+            "- Return the COMPLETE function source (a valid `def` "
+            "statement).\n"
+            "- Do not add imports for steady.\n"
+            "- Do not wrap the code in markdown fences inside the JSON "
+            "string value.\n"
+            "\n"
+            f"{JSON_CONTRACT}"
         )
+
+    @staticmethod
+    def _format_context(context: dict | None) -> str:
+        """Format the runtime context dict into a prompt section.
+
+        Args:
+            context: A dict that may contain keys such as ``function``,
+                ``signature``, ``args`` and ``kwargs``.
+
+        Returns:
+            A markdown-formatted context section, or an empty string when
+            no context is supplied.
+        """
+        if not context:
+            return ""
+
+        lines: list[str] = ["## Runtime context"]
+        for key, value in context.items():
+            lines.append(f"- {key}: {value}")
+        lines.append("")
+        return "\n".join(lines) + "\n"
 
     # ------------------------------------------------------------------
     # Backend calls
     # ------------------------------------------------------------------
-    def _call_openai(self, prompt: str) -> Tuple[str, int]:
-        """Call the OpenAI API. Returns (response_text, tokens_used)."""
+    def _call_openai(self, prompt: str) -> tuple[str, int]:
+        """Call the OpenAI Chat Completions API.
+
+        Args:
+            prompt: The fully assembled user prompt.
+
+        Returns:
+            A ``(response_text, tokens_used)`` tuple.
+        """
         from openai import OpenAI
 
         client = OpenAI(api_key=self._config.api_key)
@@ -145,7 +268,7 @@ class LLMClient:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a Python code repair assistant.",
+                    "content": SYSTEM_PROMPT,
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -155,8 +278,15 @@ class LLMClient:
         tokens = response.usage.total_tokens if response.usage else 0
         return text, tokens
 
-    def _call_anthropic(self, prompt: str) -> Tuple[str, int]:
-        """Call the Anthropic API. Returns (response_text, tokens_used)."""
+    def _call_anthropic(self, prompt: str) -> tuple[str, int]:
+        """Call the Anthropic Messages API.
+
+        Args:
+            prompt: The fully assembled user prompt.
+
+        Returns:
+            A ``(response_text, tokens_used)`` tuple.
+        """
         import anthropic
 
         client = anthropic.Anthropic(api_key=self._config.api_key)
@@ -164,15 +294,30 @@ class LLMClient:
             model=self._config.model,
             max_tokens=2048,
             temperature=0,
+            system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
         text = message.content[0].text if message.content else ""
         tokens = message.usage.input_tokens + message.usage.output_tokens
         return text, tokens
 
-    def _call_custom(self, prompt: str) -> Tuple[str, int]:
-        """Call a custom LLM callable. Returns (response_text, tokens_used)."""
-        result = self._config.llm_client(prompt)
+    def _call_custom(self, prompt: str) -> tuple[str, int]:
+        """Call a user-supplied custom LLM callable.
+
+        The callable receives the full prompt string (which already embeds
+        the system instructions) and may return either a plain ``str``
+        (the response text) or a ``(response, tokens)`` tuple.
+
+        Args:
+            prompt: The fully assembled prompt.
+
+        Returns:
+            A ``(response_text, tokens_used)`` tuple.
+        """
+        # Prepend the system prompt so custom backends also see the role
+        # description and the JSON contract.
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+        result = self._config.llm_client(full_prompt)
         if isinstance(result, tuple):
             return result
         if isinstance(result, str):
@@ -184,38 +329,180 @@ class LLMClient:
     # ------------------------------------------------------------------
     def _parse_response(
         self, response: str, tokens: int
-    ) -> Optional[LLMRepairResult]:
-        """Parse the LLM response into an LLMRepairResult."""
+    ) -> LLMRepairResult | None:
+        """Parse the LLM response into an :class:`LLMRepairResult`.
+
+        Accepts, in order of preference:
+
+        1. A JSON object (with or without markdown ``json`` fences)
+           containing ``fixed_code``, ``explanation`` and ``strategy``.
+        2. A raw code block wrapped in markdown fences (backward compat
+           with older custom callables that return plain code).
+
+        Args:
+            response: The raw model response text.
+            tokens: Tokens consumed by the call.
+
+        Returns:
+            An :class:`LLMRepairResult`, or ``None`` if the response is
+            empty or unparseable.
+        """
         if not response or not response.strip():
             return None
 
-        # Strip markdown code fences if present
-        code = response.strip()
-        if code.startswith("```python"):
-            code = code[len("```python") :]
-        elif code.startswith("```"):
-            code = code[3:]
-        if code.endswith("```"):
-            code = code[:-3]
-        code = code.strip()
+        text = response.strip()
 
+        # --- Strategy 1: try to extract a JSON object -------------------
+        json_obj = self._extract_json(text)
+        if json_obj is not None:
+            return self._result_from_json(json_obj, tokens)
+
+        # --- Strategy 2: fall back to raw code (with optional fences) ---
+        code = self._strip_code_fences(text)
         if not code:
             return None
 
         return LLMRepairResult(
             fixed_code=code,
-            explanation="LLM-generated fix",
+            explanation="LLM-generated fix (raw code response).",
             strategy="llm_repair",
             success=True,
             tokens_used=tokens,
         )
 
+    @staticmethod
+    def _extract_json(text: str) -> dict | None:
+        """Extract the first JSON object found in *text*.
 
-def create_llm_client(config: Optional[Config] = None) -> LLMClient:
-    """Factory function to create an LLMClient.
+        Handles three shapes:
+          * bare JSON,
+          * JSON inside a ```json fenced block,
+          * JSON inside a plain ``` fenced block.
+
+        Args:
+            text: The raw model response.
+
+        Returns:
+            The parsed dict, or ``None`` if no valid JSON object is found.
+        """
+        candidates: list[str] = []
+
+        # 1. Code-fenced JSON (```json ... ``` or ``` ... ```)
+        fence_pattern = re.compile(
+            r"```(?:json)?\s*\n?(.*?)```",
+            re.DOTALL | re.IGNORECASE,
+        )
+        for match in fence_pattern.finditer(text):
+            candidates.append(match.group(1).strip())
+
+        # 2. The whole text as JSON.
+        candidates.append(text)
+
+        for candidate in candidates:
+            # Locate the first balanced top-level JSON object.
+            obj = LLMClient._find_first_json_object(candidate)
+            if obj is not None:
+                return obj
+        return None
+
+    @staticmethod
+    def _find_first_json_object(text: str) -> dict | None:
+        """Find and parse the first balanced ``{...}`` object in *text*.
+
+        Args:
+            text: Text that may contain a JSON object.
+
+        Returns:
+            The parsed dict, or ``None`` if no valid object is found.
+        """
+        start = text.find("{")
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+            else:
+                if char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        snippet = text[start : index + 1]
+                        try:
+                            parsed = json.loads(snippet)
+                        except (ValueError, TypeError):
+                            return None
+                        if isinstance(parsed, dict):
+                            return parsed
+                        return None
+        return None
+
+    @staticmethod
+    def _result_from_json(
+        obj: dict, tokens: int
+    ) -> LLMRepairResult | None:
+        """Build an :class:`LLMRepairResult` from a parsed JSON dict.
+
+        Args:
+            obj: Dict expected to contain ``fixed_code``.
+            tokens: Tokens consumed by the call.
+
+        Returns:
+            An :class:`LLMRepairResult`, or ``None`` if no fixed code is
+            present.
+        """
+        fixed_code = obj.get("fixed_code")
+        if not fixed_code or not str(fixed_code).strip():
+            return None
+
+        return LLMRepairResult(
+            fixed_code=str(fixed_code).strip(),
+            explanation=str(obj.get("explanation") or "LLM-generated fix."),
+            strategy=str(obj.get("strategy") or "llm_repair"),
+            success=True,
+            tokens_used=tokens,
+        )
+
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        """Strip markdown code fences and surrounding whitespace.
+
+        Args:
+            text: Raw text that may be wrapped in ``` fences.
+
+        Returns:
+            The inner code, stripped of fences and whitespace.
+        """
+        code = text
+        if code.startswith("```python"):
+            code = code[len("```python") :]
+        elif code.startswith("```json"):
+            code = code[len("```json") :]
+        elif code.startswith("```"):
+            code = code[3:]
+        if code.endswith("```"):
+            code = code[:-3]
+        return code.strip()
+
+
+def create_llm_client(config: Config | None = None) -> LLMClient:
+    """Factory function to create an :class:`LLMClient`.
 
     Args:
-        config: Optional Config instance. Defaults to the global config.
+        config: Optional :class:`Config` instance. Defaults to the global
+            config singleton.
 
     Returns:
         A new :class:`LLMClient` instance.

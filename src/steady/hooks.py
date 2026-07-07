@@ -11,7 +11,6 @@ import importlib.abc
 import importlib.machinery
 import importlib.util
 import sys
-from typing import Optional
 
 
 class SteadyLoader(importlib.abc.Loader):

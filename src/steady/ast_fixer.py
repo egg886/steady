@@ -18,7 +18,7 @@ import ast
 import inspect
 import textwrap
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple
+from typing import Callable
 
 
 @dataclass
@@ -37,12 +37,12 @@ class ErrorInfo:
     error_msg: str  # e.g. "division by zero"
     source: str  # Full source of the function/module
     source_lines: list[str] = field(default_factory=list)
-    end_lineno: Optional[int] = None
+    end_lineno: int | None = None
 
 
 def analyze_traceback(
     exc_type, exc_value, exc_tb
-) -> Optional[ErrorInfo]:
+) -> ErrorInfo | None:
     """Extract structured error info from a traceback object.
 
     Walks to the innermost frame, reads the source file, and identifies the
@@ -76,9 +76,9 @@ def analyze_traceback(
 
     # Try to read the source file
     try:
-        with open(filename, "r", encoding="utf-8") as f:
+        with open(filename, encoding="utf-8") as f:
             file_source = f.read()
-    except (OSError, IOError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError):
         # Can't read the file (e.g. <string>, <steady>, or <stdin>)
         return ErrorInfo(
             filename=filename,
@@ -156,7 +156,7 @@ def analyze_traceback(
     )
 
 
-def get_function_source(func: Callable) -> Optional[str]:
+def get_function_source(func: Callable) -> str | None:
     """Get the source code of a function via :mod:`inspect`.
 
     Returns the function source starting from the ``def`` line (decorators
@@ -262,19 +262,19 @@ class _StatementRemover(ast.NodeTransformer):
     # NodeTransformer override
     # ------------------------------------------------------------------
     def generic_visit(self, node: ast.AST) -> ast.AST:
-        for field, old_value in ast.iter_fields(node):
+        for attr_name, old_value in ast.iter_fields(node):
             if isinstance(old_value, list):
                 new_list = self._process_list(old_value)
                 # Insert 'pass' if a body-like field becomes empty.
-                if field in self._BODY_FIELDS and not new_list:
+                if attr_name in self._BODY_FIELDS and not new_list:
                     new_list = [ast.Pass()]
-                setattr(node, field, new_list)
+                setattr(node, attr_name, new_list)
             elif isinstance(old_value, ast.AST):
-                setattr(node, field, self.visit(old_value))
+                setattr(node, attr_name, self.visit(old_value))
         return node
 
 
-def remove_error_line(source: str, lineno: int) -> Optional[str]:
+def remove_error_line(source: str, lineno: int) -> str | None:
     """Remove the statement at the given line number using AST manipulation.
 
     Parses *source* into an AST, finds the statement at *lineno*, removes it,
@@ -313,7 +313,7 @@ def remove_error_line(source: str, lineno: int) -> Optional[str]:
 def recompile_function(
     source: str,
     func_name: str,
-    globals_dict: Optional[dict] = None,
+    globals_dict: dict | None = None,
 ) -> Callable:
     """Recompile a function from source code and return the new callable.
 
@@ -349,7 +349,7 @@ def recompile_function(
 
 def try_ast_repair(
     source: str, error_info: ErrorInfo
-) -> Tuple[Optional[str], str]:
+) -> tuple[str | None, str]:
     """Try to fix the source using AST manipulation.
 
     Attempts to remove the error-causing statement identified by

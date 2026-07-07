@@ -6,6 +6,12 @@
 >
 > *Stay steady, the code runs.*
 
+[![CI](https://github.com/egg886/steady/actions/workflows/ci.yml/badge.svg)](https://github.com/egg886/steady/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/steady.svg)](https://pypi.org/project/steady/)
+[![Python versions](https://img.shields.io/pypi/pyversions/steady.svg)](https://pypi.org/project/steady/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/egg886/steady/blob/main/LICENSE)
+[![Code style: Ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
+
 `from steady import steady` wraps your code in a forgiving runtime that swallows
 errors, repairs broken functions on the fly, and keeps your program moving.
 When something blows up, steady first tries a deterministic AST-based fix (the
@@ -28,7 +34,11 @@ configured, asks it to produce a minimal patch. Every detour is logged in a
 - [Quick start](#quick-start)
 - [Configuring the AI backend](#configuring-the-ai-backend)
 - [Bug Tour Report](#bug-tour-report)
+- [Command-line interface](#command-line-interface)
 - [Comparison with fuckit.py](#comparison-with-fuckitpy)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Changelog](#changelog)
 - [License](#license)
 
 ---
@@ -57,6 +67,9 @@ steady requires Python 3.9 or newer.
 ---
 
 ## Quick start
+
+> Both `from steady import steady` and `import steady; steady.steady` expose the
+> same singleton instance — use whichever reads better in your code.
 
 ### 1. The `@steady` decorator
 
@@ -208,8 +221,26 @@ print(steady.bug_count)         # number of bugs encountered
 Or from the command line:
 
 ```bash
-python -m steady report     # print the latest Bug Tour Report
+python -m steady version   # print the installed version
+python -m steady config    # print current config (API key masked)
+python -m steady report    # print the latest Bug Tour Report
+python -m steady test      # run a quick self-test demonstrating repair
+```
+
+---
+
+## Command-line interface
+
+steady ships with a small CLI for inspection and a smoke test. Programmatic
+usage (`import steady`, `@steady`, `with steady:`) remains the primary
+interface.
+
+```bash
+python -m steady            # print help
 python -m steady version    # print the installed version
+python -m steady config     # print the current configuration (API key masked)
+python -m steady report     # print the most recent Bug Tour Report
+python -m steady test       # run a self-test that creates a buggy function and shows steady repairing it
 ```
 
 ---
@@ -235,6 +266,45 @@ AI layer and a reporting layer on top.
 | Graceful degradation             | Errors silently dropped | Configurable retries + transparent report |
 | Python version support           | 2.7 / 3.x               | 3.9+                                     |
 | External dependencies            | None                    | None (openai/anthropic are optional extras) |
+
+---
+
+## Documentation
+
+More detailed documentation lives in the [`docs/`](docs/) directory:
+
+- [**Documentation home**](docs/index.md) — overview, design principles, and
+  install guide.
+- [**API reference**](docs/api.md) — every public class, method, and
+  property.
+- [**Configuration guide**](docs/configuration.md) — environment variables,
+  programmatic configuration, custom LLM backends.
+
+---
+
+## Contributing
+
+Contributions are welcome! Please read the
+[Contributing guide](CONTRIBUTING.md) for how to set up a development
+environment, run the tests, and submit a pull request.
+
+Quick start for contributors:
+
+```bash
+git clone https://github.com/egg886/steady.git
+cd steady
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+Please open issues for bugs and feature requests at
+<https://github.com/egg886/steady/issues>.
+
+---
+
+## Changelog
+
+See the [Changelog](CHANGELOG.md) for release history and notable changes.
 
 ---
 

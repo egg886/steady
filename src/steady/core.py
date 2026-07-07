@@ -22,9 +22,10 @@ If both tiers fail the original exception is re-raised.
 from __future__ import annotations
 
 import functools
+import inspect
 import sys
 import traceback as tb_module
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable
 
 from .ast_fixer import (
     ErrorInfo,
@@ -88,7 +89,7 @@ class Steady:
     # __call__ — decorator / import hook
     # ------------------------------------------------------------------
     def __call__(
-        self, func: Optional[Union[str, Callable]] = None
+        self, func: str | Callable | None = None
     ) -> Any:
         """Use steady as a decorator or import hook.
 
@@ -124,7 +125,7 @@ class Steady:
     # ------------------------------------------------------------------
     # Context manager protocol
     # ------------------------------------------------------------------
-    def __enter__(self) -> "Steady":
+    def __enter__(self) -> Steady:
         """Enter the ``with steady:`` context.
 
         Saves the current ``sys.excepthook`` and replaces it with a no-op
@@ -248,13 +249,13 @@ class Steady:
         retry_count: int = 0
 
         # --- Step 1: Get the original function source ---
-        current_source: Optional[str] = get_function_source(func)
+        current_source: str | None = get_function_source(func)
         if current_source is None:
             raise exc
 
         # --- Step 2: Analyse the traceback ---
         current_exc: Exception = exc
-        current_error_info: Optional[ErrorInfo] = analyze_traceback(
+        current_error_info: ErrorInfo | None = analyze_traceback(
             type(exc), exc, exc.__traceback__
         )
 
@@ -507,7 +508,7 @@ class Steady:
 
     @staticmethod
     def _build_location_string(
-        error_info: Optional[ErrorInfo], exc: Any
+        error_info: ErrorInfo | None, exc: Any
     ) -> str:
         """Build a human-readable location string for a BugEntry.
 
@@ -532,10 +533,10 @@ class Steady:
 
     @staticmethod
     def _attempt_ast_repair(
-        source: Optional[str],
-        error_info: Optional[ErrorInfo],
+        source: str | None,
+        error_info: ErrorInfo | None,
         exc: Exception,
-    ) -> Tuple[Optional[str], str]:
+    ) -> tuple[str | None, str]:
         """Attempt AST repair on the current source.
 
         A thin wrapper around :func:`try_ast_repair` that handles ``None``
@@ -555,13 +556,13 @@ class Steady:
 
     def _attempt_llm_repair(
         self,
-        source: Optional[str],
-        error_info: Optional[ErrorInfo],
+        source: str | None,
+        error_info: ErrorInfo | None,
         exc: Exception,
         func: Callable,
         args: tuple,
         kwargs: dict,
-    ) -> Optional[LLMRepairResult]:
+    ) -> LLMRepairResult | None:
         """Attempt LLM repair on the current source.
 
         Args:
@@ -588,6 +589,14 @@ class Steady:
             tb_module.format_exception(type(exc), exc, exc.__traceback__)
         )
 
+        # Build a function signature string for extra LLM context.
+        # inspect.signature can fail on built-ins or C-compiled callables,
+        # so degrade gracefully.
+        try:
+            sig = str(inspect.signature(func))
+        except (ValueError, TypeError):
+            sig = "<unknown>"
+
         return self._llm.repair(
             source=source,
             error_type=error_type,
@@ -595,6 +604,7 @@ class Steady:
             traceback_str=tb_str,
             context={
                 "function": func.__name__,
+                "signature": f"{func.__name__}{sig}",
                 "args": repr(args),
                 "kwargs": repr(kwargs),
             },
@@ -606,7 +616,7 @@ class Steady:
         func: Callable,
         args: tuple,
         kwargs: dict,
-    ) -> Tuple[bool, Any, Optional[Exception]]:
+    ) -> tuple[bool, Any, Exception | None]:
         """Recompile *source* and try executing it.
 
         Args:
@@ -634,7 +644,7 @@ class Steady:
         exc: Exception,
         current_source: str,
         func_name: str,
-    ) -> Optional[ErrorInfo]:
+    ) -> ErrorInfo | None:
         """Create or refresh :class:`ErrorInfo` after a failed repair.
 
         When the repaired source is recompiled and re-executed, the new

@@ -60,10 +60,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/steady-runtime/steady"
-Repository = "https://github.com/steady-runtime/steady"
-Documentation = "https://github.com/steady-runtime/steady#readme"
-"Bug Tracker" = "https://github.com/steady-runtime/steady/issues"
+Homepage = "https://github.com/egg886/steady"
+Repository = "https://github.com/egg886/steady"
+Documentation = "https://github.com/egg886/steady#readme"
+"Bug Tracker" = "https://github.com/egg886/steady/issues"
 
 [project.scripts]
 steady = "steady.__main__:main"
@@ -99,7 +99,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["B011"]
+"tests/*" = [
+    "B011",  # Do not assert False - intentional in fault-tolerance tests
+    "F841",  # Unused variables - steady is designed to handle buggy code
+    "F821",  # Undefined names - steady is designed to handle buggy code
+]
 
 # MyPy configuration
 [tool.mypy]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from steady.config import Config, get_config
@@ -155,3 +157,91 @@ def test_singleton():
     c1 = get_config()
     c2 = get_config()
     assert c1 is c2
+
+
+# ---------------------------------------------------------------------- #
+# Additional configuration scenarios
+# ---------------------------------------------------------------------- #
+def test_configure_model(monkeypatch):
+    """configure(model=...) should update the model identifier."""
+    monkeypatch.delenv("STEADY_MODEL", raising=False)
+    config = Config()
+    assert config.model == "gpt-4o-mini"
+
+    config.configure(model="gpt-4-turbo")
+    assert config.model == "gpt-4-turbo"
+
+
+def test_configure_provider_invalid():
+    """Configuring an invalid provider should not crash (stored as-is)."""
+    config = Config()
+    config.configure(provider="invalid_provider")
+    # Stored lowercased; no exception raised.
+    assert config.provider == "invalid_provider"
+
+
+def test_env_var_max_retries_invalid(monkeypatch):
+    """Non-numeric STEADY_MAX_RETRIES should fall back to the default."""
+    monkeypatch.setenv("STEADY_MAX_RETRIES", "not-a-number")
+    config = Config()
+    assert config.max_retries == 3
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("TRUE", True),
+        ("Yes", True),
+        ("0", False),
+        ("false", False),
+        ("no", False),
+        ("anything-else", False),
+        ("", True),  # empty string keeps the default (True)
+    ],
+)
+def test_env_var_enabled_various(monkeypatch, value, expected):
+    """Various STEADY_ENABLED values should map to the correct boolean."""
+    monkeypatch.setenv("STEADY_ENABLED", value)
+    config = Config()
+    assert config.enabled is expected
+
+
+def test_thread_safety():
+    """Concurrent read/write access to Config from many threads should not crash."""
+    config = Config()
+    errors: list = []
+
+    def worker():
+        try:
+            for _ in range(100):
+                config.configure(api_key="k", model="m", max_retries=5)
+                _ = config.api_key
+                _ = config.model
+                _ = config.enabled
+                _ = config.max_retries
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+
+
+def test_llm_client_property():
+    """llm_client property should get/set a custom callable."""
+    config = Config()
+    assert config.llm_client is None
+
+    def my_llm(prompt):
+        return "fixed", 10
+
+    config.configure(llm=my_llm)
+    assert config.llm_client is my_llm

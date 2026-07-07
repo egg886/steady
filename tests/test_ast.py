@@ -214,3 +214,114 @@ def test_try_ast_repair_none_error_info():
     fixed, strategy = try_ast_repair("x = 1\n", None)
     assert fixed is None
     assert strategy == ""
+
+
+# ---------------------------------------------------------------------- #
+# remove_error_line — more complex scenarios
+# ---------------------------------------------------------------------- #
+def test_remove_from_try_except():
+    """Removing an error line inside a try block should work."""
+    source = "def f():\n    try:\n        x = 1 / 0\n    except:\n        pass\n    return 42\n"
+    result = remove_error_line(source, 3)
+    assert result is not None
+    assert "1 / 0" not in result
+    assert "return 42" in result
+
+
+def test_remove_from_nested_if():
+    """Removing a statement inside a nested if block should work."""
+    source = "def f():\n    if True:\n        if True:\n            x = 1 / 0\n    return 42\n"
+    result = remove_error_line(source, 4)
+    assert result is not None
+    assert "1 / 0" not in result
+    assert "return 42" in result
+
+
+def test_remove_multiline_statement():
+    """Removing a multi-line statement should remove all of its lines."""
+    source = (
+        "def f():\n"
+        "    x = {\n"
+        "        'a': 1,\n"
+        "        'b': 2,\n"
+        "    }\n"
+        "    return 42\n"
+    )
+    # The dict assignment spans lines 2-5; target a line in the middle.
+    result = remove_error_line(source, 3)
+    assert result is not None
+    assert "return 42" in result
+    # The whole multi-line assignment should be gone.
+    assert "'b': 2" not in result
+    assert "'a': 1" not in result
+
+
+def test_remove_first_line():
+    """Removing the first line of a function body should work."""
+    source = "def f():\n    bad = 1 / 0\n    good = 2\n    return 42\n"
+    result = remove_error_line(source, 2)
+    assert result is not None
+    assert "1 / 0" not in result
+    assert "good = 2" in result
+    assert "return 42" in result
+
+
+def test_remove_last_line():
+    """Removing the last line (a return statement) should work."""
+    source = "def f():\n    x = 1\n    return 42\n"
+    result = remove_error_line(source, 3)
+    assert result is not None
+    assert "return 42" not in result
+    assert "x = 1" in result
+
+
+# ---------------------------------------------------------------------- #
+# recompile_function — closures & defaults
+# ---------------------------------------------------------------------- #
+_CLOSURE_VALUE = 777
+
+
+def test_recompile_preserves_closure():
+    """A recompiled function should access names from the provided globals,
+    simulating closure / module-level variable access."""
+    import sys
+
+    module_globals = sys.modules[__name__].__dict__
+    source = "def f():\n    return _CLOSURE_VALUE\n"
+    func = recompile_function(source, "f", module_globals)
+    assert func() == 777
+
+
+def test_recompile_with_default_args():
+    """A recompiled function should preserve default argument values."""
+    source = "def f(a, b=10):\n    return a + b\n"
+    func = recompile_function(source, "f")
+    assert func(5) == 15
+    assert func(5, 20) == 25
+
+
+# ---------------------------------------------------------------------- #
+# try_ast_repair — real traceback integration
+# ---------------------------------------------------------------------- #
+def test_try_ast_repair_with_real_traceback():
+    """try_ast_repair should fix a function using error info from a real traceback."""
+
+    def sample():
+        bad = 1 / 0
+        return 42
+
+    try:
+        sample()
+    except ZeroDivisionError as e:
+        info = analyze_traceback(type(e), e, e.__traceback__)
+
+    assert info is not None
+    fixed, strategy = try_ast_repair(info.source, info)
+    assert fixed is not None
+    assert "1 / 0" not in fixed
+    assert "return 42" in fixed
+    assert "Removed" in strategy
+
+    # The fixed source should recompile and run correctly.
+    func = recompile_function(fixed, "sample")
+    assert func() == 42

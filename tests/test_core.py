@@ -6,6 +6,8 @@ path, which is the fuckit.py-style "remove the error line and rerun" approach.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from steady import steady
@@ -17,9 +19,16 @@ from steady.core import Steady
 # ---------------------------------------------------------------------- #
 @pytest.fixture(autouse=True)
 def _isolate_state():
-    """Clear the global steady report before and after each test."""
+    """Isolate global state before and after each test.
+
+    Clears the global steady report and protects ``sys.excepthook`` from
+    leakage caused by the context-manager protocol (which replaces it with
+    a no-op for the duration of a ``with steady:`` block).
+    """
     steady._report.clear()
+    saved_excepthook = sys.excepthook
     yield
+    sys.excepthook = saved_excepthook
     steady._report.clear()
 
 
@@ -251,3 +260,158 @@ def test_fresh_instance():
 def test_call_with_none_returns_self(enabled_steady):
     """``steady()`` with no args should return self (for ``@steady()`` syntax)."""
     assert enabled_steady() is enabled_steady
+
+
+# ---------------------------------------------------------------------- #
+# Metadata & signature preservation
+# ---------------------------------------------------------------------- #
+def test_decorator_preserves_metadata(enabled_steady):
+    """``@steady`` should preserve the wrapped function's __name__ and __doc__."""
+
+    @enabled_steady
+    def my_func():
+        """This is my docstring."""
+        return 42
+
+    assert my_func.__name__ == "my_func"
+    assert my_func.__doc__ == "This is my docstring."
+
+
+def test_decorator_with_arguments(enabled_steady):
+    """A decorated function with positional args should receive them after repair."""
+
+    @enabled_steady
+    def add_and_bug(a, b):
+        bad = 1 / 0
+        return a + b
+
+    assert add_and_bug(3, 4) == 7
+
+
+def test_decorator_with_kwargs(enabled_steady):
+    """A decorated function with keyword args should receive them after repair."""
+
+    @enabled_steady
+    def greet(name, greeting="Hello"):
+        bad = undefined_var
+        return f"{greeting}, {name}"
+
+    assert greet("World") == "Hello, World"
+    assert greet("World", greeting="Hi") == "Hi, World"
+
+
+def test_decorated_function_attribute(enabled_steady):
+    """The wrapper should expose a ``_steady_wrapped`` marker attribute."""
+
+    @enabled_steady
+    def f():
+        return 1
+
+    assert hasattr(f, "_steady_wrapped")
+    assert f._steady_wrapped is True
+
+
+# ---------------------------------------------------------------------- #
+# Exhausted-repair / re-raise
+# ---------------------------------------------------------------------- #
+def test_decorator_returns_none_on_all_fail(enabled_steady):
+    """When all repair attempts are exhausted, the original exception is re-raised.
+
+    The function contains more bugs than the configured ``max_retries`` (3),
+    so after removing the first few offending lines steady runs out of
+    retries and re-raises the original ``NameError``.
+    """
+
+    @enabled_steady
+    def f():
+        a = undefined_one
+        b = undefined_two
+        c = undefined_three
+        d = undefined_four
+        return 42
+
+    with pytest.raises(NameError):
+        f()
+
+
+# ---------------------------------------------------------------------- #
+# Context manager — advanced
+# ---------------------------------------------------------------------- #
+def test_context_manager_nested(enabled_steady):
+    """Nested ``with steady:`` blocks should each suppress their exceptions."""
+
+    with enabled_steady:
+        with enabled_steady:
+            raise ValueError("inner")
+        raise ValueError("outer")
+
+
+def test_context_manager_with_exception_in_function(enabled_steady):
+    """An exception raised inside a function called within the block is suppressed."""
+
+    def buggy():
+        bad = 1 / 0
+        return 42
+
+    with enabled_steady:
+        buggy()
+
+    # If we reach here the exception was suppressed.
+    assert True
+
+
+# ---------------------------------------------------------------------- #
+# Report — multiple calls / empty
+# ---------------------------------------------------------------------- #
+def test_report_after_multiple_calls(enabled_steady):
+    """After several buggy calls, the report should contain every recorded bug."""
+
+    @enabled_steady
+    def f1():
+        bad = 1 / 0
+        return 1
+
+    @enabled_steady
+    def f2():
+        bad = undefined_var
+        return 2
+
+    f1()
+    f2()
+
+    assert enabled_steady.bug_count >= 2
+    report = enabled_steady.report(format="dict")
+    assert report["bug_count"] >= 2
+    assert len(report["entries"]) >= 2
+
+
+def test_steady_disabled_then_works(enabled_steady):
+    """When disabled, steady should run normal functions without any repair logic."""
+
+    enabled_steady.configure(enabled=False)
+
+    @enabled_steady
+    def normal():
+        return 123
+
+    assert normal() == 123
+
+
+def test_zero_bugs_report(enabled_steady):
+    """A report with zero bugs should be valid in every supported format."""
+
+    assert enabled_steady.bug_count == 0
+
+    md = enabled_steady.report(format="markdown")
+    assert isinstance(md, str)
+    assert "No bugs" in md or "uneventful" in md
+
+    js = enabled_steady.report(format="json")
+    import json
+
+    data = json.loads(js)
+    assert data["bug_count"] == 0
+
+    d = enabled_steady.report(format="dict")
+    assert d["bug_count"] == 0
+    assert d["entries"] == []

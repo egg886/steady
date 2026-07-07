@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 __all__ = ["Config", "get_config"]
 
@@ -90,9 +90,9 @@ class Config:
 
     def __init__(self) -> None:
         # Defaults. ``_auto_load`` will overwrite these from the environment.
-        self._api_key: Optional[str] = None
+        self._api_key: str | None = None
         self._model: str = "gpt-4o-mini"
-        self._llm: Optional[Callable[..., Any]] = None  # custom LLM callable
+        self._llm: Callable[..., Any] | None = None  # custom LLM callable
         self._provider: str = "openai"
         self._max_retries: int = 3
         self._enabled: bool = True
@@ -133,12 +133,12 @@ class Config:
     def configure(
         self,
         *,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        llm: Optional[Callable[..., Any]] = None,
-        provider: Optional[str] = None,
-        max_retries: Optional[int] = None,
-        enabled: Optional[bool] = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        llm: Callable[..., Any] | None = None,
+        provider: str | None = None,
+        max_retries: int | None = None,
+        enabled: bool | None = None,
     ) -> None:
         """Programmatically update configuration.
 
@@ -196,7 +196,7 @@ class Config:
     # Read-only properties
     # ------------------------------------------------------------------ #
     @property
-    def api_key(self) -> Optional[str]:
+    def api_key(self) -> str | None:
         """The configured API key, or ``None`` if not set."""
         with self._lock:
             return self._api_key
@@ -220,7 +220,7 @@ class Config:
             return self._enabled
 
     @property
-    def llm_client(self) -> Optional[Callable[..., Any]]:
+    def llm_client(self) -> Callable[..., Any] | None:
         """A custom LLM callable supplied by the user, or ``None``."""
         with self._lock:
             return self._llm
@@ -247,7 +247,7 @@ class Config:
 # ---------------------------------------------------------------------- #
 # Process-wide singleton (lazy initialisation)
 # ---------------------------------------------------------------------- #
-_config: Optional[Config] = None
+_config: Config | None = None
 _singleton_lock = threading.Lock()
 
 
